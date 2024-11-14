@@ -1,0 +1,105 @@
+name: DevSecOps Security Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  security_scan:
+    name: Security Scanning
+    runs-on: ubuntu-latest
+
+    steps:
+    # Step 1: Checkout the repository
+    - name: Checkout Code
+      uses: actions/checkout@v3
+
+    # Step 2: Set up Python environment
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'  # Specify the Python version you need
+
+    # Step 3: Install dependencies
+    - name: Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        # Install security tools
+        pip install bandit safety
+
+    # Step 4: Static Code Analysis with Bandit
+    - name: Run Bandit Security Scan
+      run: |
+        bandit -r . -f json -o bandit-report.json
+      continue-on-error: true  # Continue even if vulnerabilities are found
+
+    # Step 5: Dependency Vulnerability Scanning with Safety
+    - name: Run Safety Dependency Scan
+      run: |
+        safety check -r requirements.txt -f json -o safety-report.json
+      continue-on-error: true
+
+    # Step 6: Collect Reports
+    - name: Upload Bandit Report
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: bandit-report
+        path: bandit-report.json
+
+    - name: Upload Safety Report
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: safety-report
+        path: safety-report.json
+
+    # Step 7: Generate Summary and Comment on PR/Commit
+    - name: Generate and Post Security Summary
+      if: github.event_name == 'pull_request' || github.event_name == 'push'
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const fs = require('fs');
+          const banditReport = fs.existsSync('bandit-report.json') ? JSON.parse(fs.readFileSync('bandit-report.json', 'utf8')) : { results: [] };
+          const safetyReport = fs.existsSync('safety-report.json') ? JSON.parse(fs.readFileSync('safety-report.json', 'utf8')) : { vulnerabilities: [] };
+
+          let summary = "## 🛡️ Security Scan Report\n\n";
+
+          // Bandit Results
+          summary += `### 🔒 Bandit Findings: ${banditReport.results.length} issues found\n\n`;
+          if (banditReport.results.length > 0) {
+            summary += "| Severity | Issue | File | Line |\n| --- | --- | --- | --- |\n";
+            banditReport.results.forEach(issue => {
+              summary += `| ${issue.severity} | ${issue.issue_text} | ${issue.filename} | ${issue.line_number} |\n`;
+            });
+          } else {
+            summary += "No issues found by Bandit.\n";
+          }
+
+          summary += "\n";
+
+          // Safety Results
+          summary += `### 📦 Safety Dependency Findings: ${safetyReport.vulnerabilities.length} vulnerabilities found\n\n`;
+          if (safetyReport.vulnerabilities.length > 0) {
+            summary += "| Package | Vulnerability | Severity |\n| --- | --- | --- |\n";
+            safetyReport.vulnerabilities.forEach(vuln => {
+              summary += `| ${vuln.package} | ${vuln.vulnerability} | ${vuln.severity} |\n`;
+            });
+          } else {
+            summary += "No vulnerabilities found by Safety.\n";
+          }
+
+          // Post the summary as a comment
+          const commentBody = summary;
+          const pr = context.payload.pull_request;
+          const issue_number = pr ? pr.number : context.issue.number;
+
+          github.rest.issues.createComment({
+            ...context.repo,
+            issue_number: issue_number,
+            body: commentBody
+          });
